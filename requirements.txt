@@ -1,0 +1,9 @@
+streamlit==1.38.0
+pandas>=2.2
+numpy>=1.26
+supabase==2.6.0
+streamlit-aggrid==0.3.4.post3
+sentence-transformers>=2.7
+rapidfuzz>=3.9
+openpyxl>=3.1
+faiss-cpu>=1.8 ; platform_system != "Windows"

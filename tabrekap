@@ -1,0 +1,157 @@
+# =============== TAB REKAP (DIKELOMPOKKAN PER SESI) ===============
+with tabs[1]:
+    st.subheader("Rekap Pertanyaan (dikelompokkan per sesi)")
+
+    # ===== Filter & paging =====
+    c1, c2, c3 = st.columns(3)
+    with c1: qkey = st.text_input("Cari (kata kunci)", key="grp_q")
+    with c2: media_f = st.text_input("Filter media", key="grp_m")
+    with c3: journ_f = st.text_input("Filter wartawan", key="grp_j")
+
+    per_page = st.selectbox("Baris per halaman", [50, 100, 200], index=1, key="grp_pp")
+    page = st.number_input("Halaman", min_value=1, value=1, step=1, key="grp_pg")
+    offset = (page - 1) * per_page
+
+    # ===== Ambil data =====
+    df_raw = query_questions(
+        qkey=qkey, media=media_f, journalist=journ_f,
+        limit=per_page, offset=offset
+    )
+
+    if df_raw.empty:
+        st.info("Belum ada data atau tidak ada yang cocok dengan filter.")
+        st.stop()
+
+    # Buang kolom yang tidak dipakai tampilan
+    drop_cols = [c for c in ["session_time", "timestamp_tz"] if c in df_raw.columns]
+    # → kita tetap butuh salah satu di bawah untuk format tanggal/jam
+    #   jadi jangan di-drop sebelum dipakai.
+
+    # ===== Tentukan kolom waktu yang tersedia =====
+    time_col = None
+    if "session_time" in df_raw.columns:
+        time_col = "session_time"
+    elif "timestamp" in df_raw.columns:
+        time_col = "timestamp"
+
+    # ===== Format tanggal & jam =====
+    df_raw = df_raw.copy()
+    if time_col:
+        ts = pd.to_datetime(df_raw[time_col], errors="coerce")
+        df_raw["tanggal"] = ts.dt.strftime("%Y-%m-%d").fillna("")
+        df_raw["jam"]     = ts.dt.strftime("%H:%M").fillna("")
+    else:
+        # fallback kalau tidak ada informasi waktu sama sekali
+        df_raw["tanggal"] = ""
+        df_raw["jam"]     = ""
+
+    # ===== Bangun label header sesi (mirip merge & center) =====
+    df_raw["sesi"] = (
+        df_raw["tanggal"].astype(str).str.strip() + " | " +
+        df_raw["jam"].astype(str).str.strip() + " | " +
+        df_raw.get("media", "").astype(str).str.strip() + " | " +
+        df_raw.get("journalist", "").astype(str).str.strip()
+    )
+
+    # ===== View data yang ditampilkan =====
+    keep_cols = ["id", "sesi", "question", "answer"]
+    df_view = df_raw[keep_cols].fillna("").sort_values("id", ascending=False).reset_index(drop=True)
+    df_view = pd.DataFrame(display_rows)
+    st.write("Preview df_view:", df_view.head(10))
+
+
+    # Debug: pastikan kolom 'sesi' atau baris header sudah ada
+    st.write("Preview df_view:", df_view.head(10))
+
+    # ===== Konfigurasi ag-Grid =====
+    gb = GridOptionsBuilder.from_dataframe(df_view)
+
+    # Kolom 'sesi' jadi grup (header), disembunyikan dari baris anak
+    gb.configure_column(
+        "sesi",
+        header_name="Tanggal | Jam | Media | Wartawan",
+        rowGroup=True,
+        hide=True
+    )
+
+    # Kolom lain
+    gb.configure_column("id", header_name="ID", width=80, pinned="left", flex=0)
+    gb.configure_column("question", header_name="pertanyaan",
+                        wrapText=True, autoHeight=True, minWidth=420, flex=3)
+    gb.configure_column("answer", header_name="jawaban",
+                        wrapText=True, autoHeight=True, minWidth=520, flex=4)
+
+    # Opsi grouping & checkbox (centang di header grup akan menyalakan semua anak)
+    gb.configure_grid_options(
+        domLayout="autoHeight",
+        groupDisplayType="groupRows",
+        groupDefaultExpanded=1,
+        rowSelection="multiple",
+        groupSelectsChildren=True,
+        suppressRowClickSelection=True,
+        autoGroupColumnDef={
+            "headerName": "Tanggal | Jam | Media | Wartawan",
+            "minWidth": 420,
+            "cellRenderer": "agGroupCellRenderer",
+            "cellRendererParams": {
+                "suppressCount": True,   # jangan tampilkan hitung anak
+                "checkbox": True         # checkbox di baris grup (header sesi)
+            },
+            "cellStyle": {
+                "display": "flex",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "textAlign": "center",
+                "fontWeight": "600"
+            }
+        },
+    )
+
+    # Checkbox di leaf rows juga aktif
+    gb.configure_selection(selection_mode="multiple", use_checkbox=True)
+
+    grid_options = gb.build()
+
+    # Sedikit gaya untuk baris grup (biar seperti merge & center yang kontras)
+    st.markdown("""
+    <style>
+      .ag-row-group .ag-group-cell,
+      .ag-row-group.ag-row-level-0 .ag-cell {
+        background: #fafafa !important;
+        font-weight: 600 !important;
+      }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ===== Render grid =====
+    grid_response = AgGrid(
+        df_view,
+        gridOptions=grid_options,
+        columns_auto_size_mode=ColumnsAutoSizeMode.NO_AUTOSIZE,
+        fit_columns_on_grid_load=True,
+        enable_enterprise_modules=False,
+        allow_unsafe_jscode=False,
+        update_mode="NO_UPDATE",  # kita hanya baca pilihan, tidak edit di grid
+        height=400,
+    )
+
+    # ===== Ambil pilihan aman untuk hapus =====
+    selected = grid_response.get("selected_rows") or []
+    try:
+        ids_to_delete = [int(r["id"]) for r in selected if "id" in r and str(r["id"]).isdigit()]
+    except Exception:
+        ids_to_delete = []
+
+    col_del, col_hint = st.columns([1, 3])
+    with col_del:
+        if st.button(f"🗑️ Hapus terpilih ({len(ids_to_delete)})", key=f"del_grp_{page}_{per_page}"):
+            if not ids_to_delete:
+                st.warning("Belum ada baris (leaf) yang dicentang.")
+            else:
+                ok = delete_rows_by_ids(ids_to_delete)
+                if ok:
+                    st.success(f"Berhasil menghapus {len(ids_to_delete)} baris.")
+                    st.rerun()
+    with col_hint:
+        st.caption("Header sesi menampilkan Tanggal | Jam | Media | Wartawan (tampil seperti merge & center). "
+                   "Centang header sesi untuk memilih semua Q&A di dalamnya.")

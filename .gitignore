@@ -1,0 +1,17 @@
+# virtual env & cache
+venv/
+.cache/
+__pycache__/
+*.pyc
+
+# kredensial/rahasia
+.env
+.streamlit/secrets.toml
+
+# file lokal besar
+*.xlsx
+*.csv
+
+# OS/editor
+.DS_Store
+Thumbs.db
