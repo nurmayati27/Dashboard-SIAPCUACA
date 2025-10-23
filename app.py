@@ -263,16 +263,20 @@ def delete_rows_by_ids(ids: list[int]) -> bool:
 
 def query_questions(qkey: str = "", media: str = "", journalist: str = "",
                     limit: int = 200, offset: int = 0) -> pd.DataFrame:
-    q = sb.table("questions").select("id,question,answer,session_time,media,journalist,timestamp").order("timestamp", desc=True)
+    q = (
+        sb.table("questions")
+          .select("id,question,answer,session_time,media,journalist,timestamp")
+          .order("session_time", desc=True)   # ← tanpa nulls=
+          .order("timestamp",   desc=True)    # ← fallback
+    )
+
     if media:
         q = q.ilike("media", f"%{media}%")
     if journalist:
         q = q.ilike("journalist", f"%{journalist}%")
     if qkey:
-        q = q.or_(
-            "question.ilike.%{0}%,answer.ilike.%{0}%,journalist.ilike.%{0}%,media.ilike.%{0}%"
-            .format(qkey)
-        )
+        q = q.or_("question.ilike.%{0}%,answer.ilike.%{0}%,journalist.ilike.%{0}%,media.ilike.%{0}%".format(qkey))
+
     q = q.range(offset, offset + limit - 1)
     data = q.execute().data or []
     return pd.DataFrame(data)
@@ -967,50 +971,80 @@ def render_rekap():
 
     df_raw = query_questions(qkey=qkey, media="", journalist="", limit=10000, offset=0)
 
-    import datetime as dt
-    time_col = None
-    if "session_time" in df_raw.columns:   time_col = "session_time"
-    elif "timestamp_tz" in df_raw.columns: time_col = "timestamp_tz"
-    elif "timestamp"   in df_raw.columns:  time_col = "timestamp"
+    # DEBUG aman: cari tmin/tmax dari gabungan kolom waktu yang ada
+    t = pd.Series(pd.NaT, index=df_raw.index)
+    for c in ["session_time", "timestamp_tz", "timestamp"]:
+        if c in df_raw.columns:
+            t = t.fillna(pd.to_datetime(df_raw[c], errors="coerce"))
 
+    st.caption(f"DEBUG: df_raw tmin={t.min()} tmax={t.max()} n={len(df_raw)}")
+
+    import datetime as dt
+
+    # ===== Normalisasi waktu & siapkan df_f =====
     df_f = df_raw.copy()
-    if time_col:
-        df_f[time_col] = pd.to_datetime(df_f[time_col], errors="coerce")
-        df_f["year"]   = df_f[time_col].dt.year
-    else:
-        df_f["year"]   = pd.NA
+
+    # kolom waktu gabungan: t = coalesce(session_time, timestamp_tz, timestamp)
+    df_f["t"] = pd.NaT
+    for col in ["session_time", "timestamp_tz", "timestamp"]:
+        if col in df_f.columns:
+            df_f[col] = pd.to_datetime(df_f[col], errors="coerce")
+            df_f["t"] = df_f["t"].fillna(df_f[col])
+
+    df_f["year"] = df_f["t"].dt.year
 
     with st.expander("🔎 Filter waktu", expanded=True):
         colY, colA, colB, colC = st.columns([1,1,1,1])
+
+        # Opsi Tahun dari data
         tahun_tersedia = sorted([int(y) for y in df_f["year"].dropna().unique()], reverse=True)
-        default_tahun  = [tahun_tersedia[0]] if tahun_tersedia else []
-        with colY:
-            pilih_tahun = st.multiselect("Tahun", tahun_tersedia, default=default_tahun)
+        pilih_tahun = colY.multiselect("Tahun", tahun_tersedia, default=[])
 
-        today    = dt.date.today()
-        start_90 = today - dt.timedelta(days=90)
-        with colA:
-            use_last_90 = st.checkbox("90 hari terakhir", value=True)
-        with colB:
-            start_date = st.date_input("Dari", start_90, key="rekap_from")
-        with colC:
-            end_date   = st.date_input("Sampai", today, key="rekap_to")
+        # 90 hari terakhir (OFF by default)
+        use_last_90 = colA.checkbox("90 hari terakhir", value=False)
 
-        if pilih_tahun:
-            df_f = df_f[df_f["year"].isin(pilih_tahun)]
+        # Rentang default = min..max dari data (fallback aman)
+        tmin = df_f["t"].min()
+        tmax = df_f["t"].max()
+        if pd.isna(tmin): tmin = pd.Timestamp("2000-01-01")
+        if pd.isna(tmax): tmax = pd.Timestamp.today()
 
-        if time_col:
-            _start_date, _end_date = (start_90, today) if use_last_90 else (start_date, end_date)
-            mask_date = (
-                (df_f[time_col].dt.date >= _start_date) &
-                (df_f[time_col].dt.date <= _end_date)
+        start_date = colB.date_input("Dari", tmin.date(), key="rekap_from")
+        end_date   = colC.date_input("Sampai", tmax.date(), key="rekap_to")
+
+        # ==== Terapkan filter ====
+        filtered = df_f.dropna(subset=["t"]).copy()
+
+        if use_last_90:
+            batas = pd.Timestamp.today().normalize() - pd.Timedelta(days=90)
+            filtered = filtered[filtered["t"] >= batas]
+            range_info = (batas.date(), dt.date.today())
+
+        elif pilih_tahun:
+            filtered = filtered[filtered["year"].isin(pilih_tahun)]
+            range_info = (
+                filtered["t"].min().date() if not filtered.empty else start_date,
+                filtered["t"].max().date() if not filtered.empty else end_date,
             )
-            df_f = df_f.loc[mask_date].copy()
+
+        else:
+            mask = (filtered["t"].dt.date >= start_date) & (filtered["t"].dt.date <= end_date)
+            filtered = filtered.loc[mask].copy()
+            range_info = (start_date, end_date)
+
+        # Urutkan final: t desc, lalu timestamp desc (kalau ada)
+        filtered = filtered.sort_values(
+            by=["t", "timestamp"] if "timestamp" in filtered.columns else ["t"],
+            ascending=[False, False] if "timestamp" in filtered.columns else [False],
+            na_position="last",
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+        df_f = filtered
 
         st.caption(
-            f"Filter aktif → Tahun: "
-            f"{', '.join(map(str, pilih_tahun)) if pilih_tahun else 'semua'}; "
-            f"Tanggal: {_start_date if time_col else '-'} s.d. {_end_date if time_col else '-'}."
+            f"Filter aktif → Tahun: {', '.join(map(str, pilih_tahun)) if pilih_tahun else 'semua'}; "
+            f"Tanggal: {range_info[0]} s.d. {range_info[1]}."
         )
 
     if df_f.empty:
@@ -1020,13 +1054,12 @@ def render_rekap():
     # ---------- Tentukan & format waktu (pakai df_f hasil filter) ----------
     df_fmt = df_f.copy()   # <- ganti nama saja biar jelas
 
-    if time_col:
-        ts = pd.to_datetime(df_fmt[time_col], errors="coerce")
-        df_fmt["tanggal"] = ts.dt.strftime("%Y-%m-%d").fillna("")
-        df_fmt["jam"]     = ts.dt.strftime("%H:%M").fillna("")
-    else:
-        df_fmt["tanggal"] = ""
-        df_fmt["jam"]     = ""
+    # (baru) selalu gunakan kolom gabungan 't'
+    df_fmt = df_f.copy()  # pakai hasil filter
+    ts = pd.to_datetime(df_fmt["t"], errors="coerce")
+    df_fmt["tanggal"] = ts.dt.strftime("%Y-%m-%d").fillna("")
+    df_fmt["jam"]     = ts.dt.strftime("%H:%M").fillna("")
+
 
     # Label header sesi tetap seperti punyamu
     df_fmt["sesi"] = (
