@@ -971,6 +971,8 @@ def render_rekap():
 
     df_raw = query_questions(qkey=qkey, media="", journalist="", limit=10000, offset=0)
 
+    st.caption(f"DEBUG: jumlah data dari Supabase = {len(df_raw)} baris")
+
     # DEBUG aman: cari tmin/tmax dari gabungan kolom waktu yang ada
     t = pd.Series(pd.NaT, index=df_raw.index)
     for c in ["session_time", "timestamp_tz", "timestamp"]:
