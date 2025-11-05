@@ -102,9 +102,9 @@ if DEBUG_SIM:
     )
 
 # injeksi JS auto-resize SEKALI untuk semua <textarea>
-BOOT("before inject CSS/JS")
-st.markdown(AUTOSIZE_JS, unsafe_allow_html=True)
-BOOT("after inject CSS/JS")
+#BOOT("before inject CSS/JS")
+#st.markdown(AUTOSIZE_JS, unsafe_allow_html=True)
+#BOOT("after inject CSS/JS")
 
 BOOT("start app.py (imports selesai)")
 
@@ -684,6 +684,11 @@ with st.sidebar.expander("⚙️ Cek Kemiripan Pertanyaan Disini", expanded=Fals
 
 tabs = st.tabs(["📝 Input", "📋 Rekap", "📤 Export"])
 BOOT("tabs/layout siap")
+
+# injeksi JS auto-resize SEKALI per sesi (setelah UI “jadi”)
+if not st.session_state.get("_autosize_js_injected"):
+    st.markdown(AUTOSIZE_JS, unsafe_allow_html=True)
+    st.session_state["_autosize_js_injected"] = True
 
 def _normalize_text(s: str) -> str:
     s = (s or "").lower()
